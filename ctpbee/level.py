@@ -1,5 +1,7 @@
 import inspect
 import os
+import sys
+import types
 from functools import partial
 from types import MethodType
 from typing import Set, List, AnyStr, Text
@@ -9,7 +11,7 @@ from ctpbee.constant import EVENT_INIT_FINISHED, EVENT_TICK, EVENT_BAR, EVENT_OR
     EVENT_POSITION, EVENT_ACCOUNT, EVENT_CONTRACT, OrderData, SharedData, BarData, TickData, TradeData, \
     PositionData, AccountData, ContractData, Offset, Direction, OrderType, Exchange
 from ctpbee.data_handle.level_position import ApiPositionManager
-from ctpbee.event_engine.engine import EVENT_TIMER, Event
+from ctpbee.constant import EVENT_TIMER, Event
 from ctpbee.exceptions import ConfigError
 from ctpbee.func import helper, get_ctpbee_path
 from ctpbee.helpers import check, exec_intercept
@@ -41,8 +43,8 @@ class Action(object):
         raise ValueError(f"请确保传入的func 类型为函数, 当前传入参数类型为{type(func)}")
 
     @property
-    def action(self):
-        return self.app.action
+    def center(self):
+        return self.app.center
 
     @property
     def recorder(self):
@@ -71,6 +73,17 @@ class Action(object):
     def __init__(self, app=None):
         self.app = app
 
+    def cancel_all(self):
+        """ 撤掉所有的报单信息 """
+        for order in self.app.center.active_orders:
+            self.cancel(order.order_id, order)
+
+    def close_all(self):
+        """ 平全部仓位
+        API 需要进行一个大的ct
+        """
+        raise ValueError("此API 暂时未被启用， 将在1.3.1启用")
+
     def buy(self, price: float, volume: float, origin: [BarData, TickData, TradeData, OrderData, PositionData],
             price_type: OrderType = OrderType.LIMIT, stop: bool = False, lock: bool = False, **kwargs):
         """
@@ -91,10 +104,10 @@ class Action(object):
          开仓 空头
         """
 
-        if not isinstance(self.app.config['SLIPPAGE_intSHORT'], float) and not isinstance(
+        if not isinstance(self.app.config['SLIPPAGE_SHORT'], float) and not isinstance(
                 self.app.config['SLIPPAGE_SHORT'], int):
             raise ConfigError(message="滑点配置应为浮点小数")
-        price = price + self.app.config['SLIPPAGE_SHORT']
+        price = price - self.app.config['SLIPPAGE_SHORT']
         req = helper.generate_order_req_by_var(volume=volume, price=price, offset=Offset.OPEN,
                                                direction=Direction.SHORT,
                                                type=price_type, exchange=origin.exchange, symbol=origin.symbol)
@@ -123,7 +136,7 @@ class Action(object):
         if not isinstance(self.app.config['SLIPPAGE_COVER'], float) and not isinstance(
                 self.app.config['SLIPPAGE_COVER'], int):
             raise ConfigError(message="滑点配置应为浮点小数")
-        price = price + self.app.config['SLIPPAGE_COVER']
+        price = price - self.app.config['SLIPPAGE_COVER']
         req_list = [helper.generate_order_req_by_var(volume=x[1], price=price, offset=x[0], direction=Direction.SHORT,
                                                      type=price_type, exchange=origin.exchange,
                                                      symbol=origin.symbol) for x in
@@ -133,6 +146,8 @@ class Action(object):
     def cancel(self, id: Text, origin: [BarData, TickData, TradeData, OrderData, PositionData] = None, **kwargs):
         if "." in id:
             orderid = id.split(".")[1]
+        else:
+            orderid = id
         if origin is None:
             exchange = kwargs.get("exchange")
             if isinstance(exchange, Exchange):
@@ -148,9 +163,11 @@ class Action(object):
             if not order:
                 print("找不到订单啦... 撤不了哦")
                 return None
-            exchange = order.exchange.value
+            try:
+                exchange = order.exchange.value
+            except AttributeError:
+                exchange = order.exchange
             local_symbol = order.local_symbol
-
         req = helper.generate_cancel_req_by_str(order_id=orderid, exchange=exchange, symbol=local_symbol)
         return self.cancel_order(req)
 
@@ -186,7 +203,7 @@ class Action(object):
                             [Offset.CLOSETODAY, volume - position.yd_volume]] if position.yd_volume != 0 else [
                         [Offset.CLOSETODAY, volume]]
             else:
-                raise ValueError("异常配置, ctpbee只支持today和yesterday两种优先模式")
+                raise ValueError("bad config, ctpbee just on support today and yesterday")
 
         position: PositionData = app.recorder.position_manager.get_position_by_ld(local_symbol, direction)
         if not position:
@@ -194,7 +211,7 @@ class Action(object):
             warn(msg)
             return []
         if position.volume < volume:
-            msg = f"{local_symbol}在{direction.value}上仓位不足, 平掉当前 {direction.value} 的所有持仓, 平仓数量: {position.volume}"
+            msg = f"{local_symbol} position at {direction.value} is not enough, close all the {direction.value} position, close count: {position.volume}"
             warn(msg)
             return cal_req(position, position.volume, app)
         else:
@@ -299,7 +316,6 @@ class CtpbeeApi(BeeApi):
             EVENT_TICK: cls.on_tick,
             EVENT_BAR: cls.on_bar,
             EVENT_ORDER: cls.on_order,
-            EVENT_SHARED: cls.on_shared,
             EVENT_TRADE: cls.on_trade,
             EVENT_POSITION: cls.on_position,
             EVENT_ACCOUNT: cls.on_account,
@@ -323,6 +339,7 @@ class CtpbeeApi(BeeApi):
 
     def __call__(self, event: Event = None):
         # 特别处理两种情况
+
         if event and event.type == EVENT_ORDER:
             if event.data.local_order_id in self.order_id_mapping:
                 self.level_position_manager.on_order(event.data)
@@ -335,9 +352,32 @@ class CtpbeeApi(BeeApi):
             if not self.frozen:
                 self.map[EVENT_TIMER](self)
         else:
+            if event and not self.frozen and (event.type == EVENT_TICK or event.type == EVENT_BAR) and len(
+                    self.func) != 0:
+                args = list(self.func[0][2])
+                if event.type == self.func[0][1]:
+                    """ 如果数据类型"""
+                    args.insert(0, event.data)
+                    result = self.func[0][0](*args)
+                    if result == self.complete:
+                        self.func.clear()
+                    return None
             func = self.map[event.type]
             if not self.frozen:
                 func(self, event.data)
+
+    @property
+    def complete(self):
+        """ 结束当前任务 """
+        return "end"
+
+    def run_until_complete(self, target=None, *args, typed=EVENT_TICK):
+        """ 越过函数检查， 进行循环判断,  目前只支持单步队列
+        """
+        self.func.clear()
+        if not isinstance(target, types.MethodType) and not isinstance(target, types.FunctionType):
+            raise TypeError("target参数类型应该为一个函数")
+        self.func.append((target, typed, *args))
 
     def __init__(self, extension_name, app=None, **kwargs):
         """
@@ -348,7 +388,8 @@ class CtpbeeApi(BeeApi):
         self.instrument_set: List or Set = set()
         self.extension_name = extension_name
         self.app = app
-
+        self.func = []
+        init = False
         if self.app is not None:
             self.init_app(self.app)
         # 是否冻结
@@ -402,6 +443,12 @@ class CtpbeeApi(BeeApi):
         return ActionProxy(self.app.action, self)
 
     @property
+    def center(self):
+        if self.app is None:
+            raise ValueError("没有载入CtpBee，请尝试通过init_app载入app")
+        return self.app.center
+
+    @property
     def logger(self):
         return self.app.logger
 
@@ -427,10 +474,10 @@ class CtpbeeApi(BeeApi):
             raise ValueError("没有载入CtpBee，请尝试通过init_app载入app")
         return self.app.recorder
 
-    def on_order(self, order: OrderData) -> None:
-        pass
+    def get_strategy(self, strategy_name):
+        return self.app.get_extension(strategy_name)
 
-    def on_shared(self, shared: SharedData) -> None:
+    def on_order(self, order: OrderData) -> None:
         pass
 
     def on_bar(self, bar: BarData) -> None:
@@ -460,7 +507,7 @@ class CtpbeeApi(BeeApi):
     def init_app(self, app):
         if app is not None:
             self.app = app
-            self.app.extensions[self.extension_name] = self
+            self.app._extensions[self.extension_name] = self
 
     def route(self, handler):
         """ """
@@ -482,155 +529,3 @@ class CtpbeeApi(BeeApi):
             return funcd
 
         return attribute
-
-
-class AsyncApi(object):
-    """
-    数据模块
-    策略模块
-        如果你要开发上述插件需要继承此抽象demo
-    AsyncApi ---> 性能优化
-    """
-
-    def __new__(cls, *args, **kwargs):
-        map = {
-            EVENT_TIMER: cls.on_realtime,
-            EVENT_INIT_FINISHED: cls.on_init,
-            EVENT_TICK: cls.on_tick,
-            EVENT_BAR: cls.on_bar,
-            EVENT_ORDER: cls.on_order,
-            EVENT_SHARED: cls.on_shared,
-            EVENT_TRADE: cls.on_trade,
-            EVENT_POSITION: cls.on_position,
-            EVENT_ACCOUNT: cls.on_account,
-            EVENT_CONTRACT: cls.on_contract,
-        }
-        parmeter = {
-            EVENT_TIMER: EVENT_TIMER,
-            EVENT_INIT_FINISHED: EVENT_INIT_FINISHED,
-            EVENT_POSITION: EVENT_POSITION,
-            EVENT_TRADE: EVENT_TRADE,
-            EVENT_BAR: EVENT_BAR,
-            EVENT_TICK: EVENT_TICK,
-            EVENT_ORDER: EVENT_ORDER,
-            EVENT_SHARED: EVENT_SHARED,
-            EVENT_ACCOUNT: EVENT_ACCOUNT,
-            EVENT_CONTRACT: EVENT_CONTRACT,
-        }
-        setattr(cls, "map", map)
-        setattr(cls, "parmeter", parmeter)
-        return super().__new__(cls)
-
-    def __init__(self, extension_name, app=None):
-        """
-        init function
-        :param name: extension name , 插件名字
-        :param app: CtpBee 实例
-        :param api_type 针对几种API实行不同的优化措施
-        """
-        self.extension_name = extension_name
-        self.instrument_set: List or Set = set()
-        self.app = app
-        if self.app is not None:
-            self.init_app(self.app)
-        # 是否冻结
-        self.frozen = False
-
-    @property
-    def action(self):
-        if self.app is None:
-            raise ValueError("没有载入CtpBee，请尝试通过init_app载入app")
-        return self.app.action
-
-    @property
-    def recorder(self):
-        if self.app is None:
-            raise ValueError("没有载入CtpBee，请尝试通过init_app载入app")
-        return self.app.recorder
-
-    @property
-    def logger(self):
-        if self.app is None:
-            raise ValueError("没有载入CtpBee，请尝试通过init_app载入app")
-        return self.app.logger
-
-    def warning(self, msg, **kwargs):
-        kwargs['owner'] = "API: " + self.extension_name
-        self.logger.warning(msg, **kwargs)
-
-    def info(self, msg, **kwargs):
-        kwargs['owner'] = "API: " + self.extension_name
-        self.logger.info(msg, **kwargs)
-
-    def error(self, msg, **kwargs):
-        kwargs['owner'] = "API: " + self.extension_name
-        self.logger.error(msg, **kwargs)
-
-    def debug(self, msg, **kwargs):
-        kwargs['owner'] = "API: " + self.extension_name
-        self.logger.debug(msg, **kwargs)
-
-    async def on_order(self, order: OrderData) -> None:
-        pass
-
-    async def on_shared(self, shared: SharedData) -> None:
-        pass
-
-    async def on_bar(self, bar: BarData) -> None:
-        raise NotImplemented
-
-    async def on_tick(self, tick: TickData) -> None:
-        raise NotImplemented
-
-    async def on_trade(self, trade: TradeData) -> None:
-        pass
-
-    async def on_position(self, position: PositionData) -> None:
-        pass
-
-    async def on_account(self, account: AccountData) -> None:
-        pass
-
-    async def on_contract(self, contract: ContractData):
-        pass
-
-    async def on_init(self, init: bool):
-        pass
-
-    async def on_realtime(self):
-        pass
-
-    def route(self, handler):
-        """ """
-        if handler not in self.map:
-            raise TypeError(f"呀， ctpbee暂不支持此函数类型 {handler}")
-
-        def converter(func):
-            self.map[handler] = func
-            return func
-
-        return converter
-
-    def register(self):
-        """ 用于注册函数 """
-
-        def attribute(func):
-            funcd = MethodType(func, self)
-            setattr(self, func.__name__, funcd)
-            return funcd
-
-        return attribute
-
-    def init_app(self, app):
-        if app is not None:
-            self.app = app
-            self.app.extensions[self.extension_name] = self
-
-    async def __call__(self, event: Event = None):
-        if not event:
-            if not self.frozen:
-                await self.map[EVENT_TIMER](self)
-        else:
-            func = self.map[event.type]
-            if not self.frozen:
-                await func(self, event.data)

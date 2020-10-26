@@ -101,10 +101,10 @@ def check(type: AnyStr):
         def wrapper(*args, **kwargs):
             if type == "market":
                 if args[0].app.market is None:
-                    raise ValueError("当前账户行情api未连接")
+                    raise ValueError("当前账户行情api未连接,请检查你的代码中是否使用了行情接口API")
             elif type == "trader":
-                if args[0].app.market is None:
-                    raise ValueError("当前账户交易api未连接")
+                if args[0].app.trader is None:
+                    raise ValueError("当前账户交易api未连接,请检查你的代码中是否使用了交易接口API")
             else:
                 raise ValueError("非法字符串")
             return func(*args, **kwargs)
@@ -225,7 +225,7 @@ def run_forever(app):
             """ 到了该启动的时间但是没运行 """
             app.recorder.clear_all()  # 清空记录器中所有的数据
             app.reload()  # 重载接口
-            for x in app.extensions.keys():
+            for x in app._extensions.keys():
                 app.enable_extension(x)
             print(f"重新进行自动登录， 时间: {str(current_time)}")
             running_status = True
@@ -235,10 +235,10 @@ def run_forever(app):
 
         elif not running_me and running_status:
             """ 非交易日 并且在运行 """
-            for x in app.extensions.keys():
+            for x in app._extensions.keys():
                 app.suspend_extension(x)
-                if hasattr(app.extensions[x], "f_init"):
-                    app.extensions[x].f_init = False
+                if hasattr(app._extensions[x], "f_init"):
+                    app._extensions[x].f_init = False
             print(f"当前时间不允许， 时间: {str(current_time)}, 即将阻断运行")
             running_status = False
 
@@ -251,24 +251,25 @@ def run_forever(app):
 def refresh_query(app):
     """ 循环查询 """
     while True:
-        sleep(1)
         cur = datetime.now()
-        if not TradingDay.is_trading_day(cur) or not auth_check_time(cur):
-            continue
-        app.query_position()
+        # if not TradingDay.is_trading_day(cur) or not auth_check_time(cur):
+        #     continue
+        sleep(1)
+        app.trader.query_position()
         sleep(app.config['REFRESH_INTERVAL'])
-        app.query_account()
+        app.trader.query_account()
+
         if not app.r_flag:
             break
 
 
-def value_call(func):
+def helper_call(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
         d = func(*args, **kwargs)
         self, event = args
-        for value in self.app.extensions.values():
-            if self.app.config['INSTRUMENT_INDEPEND']:
+        for value in self.app._extensions.values():
+            if self.app.config.get('INSTRUMENT_INDEPEND'):
                 if len(value.instrument_set) == 0:
                     warnings.warn("你当前开启策略对应订阅行情功能, 当前策略的订阅行情数量为0，请确保你的订阅变量是否为instrument_set，以及订阅具体代码")
                 if event.data.local_symbol in value.instrument_set:
@@ -285,7 +286,7 @@ def async_value_call(func):
     async def wrapper(*args, **kwargs):
         d = await func(*args, **kwargs)
         self, event = args
-        for value in self.app.extensions.values():
+        for value in self.app._extensions.values():
             if self.app.config['INSTRUMENT_INDEPEND']:
                 if len(value.instrument_set) == 0:
                     warnings.warn("你当前开启策略对应订阅行情功能, 当前策略的订阅行情数量为0，请确保你的订阅变量是否为instrument_set，以及订阅具体代码")
@@ -332,8 +333,12 @@ def exec_intercept(self, func):
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        result = func(*args, **kwargs)
-        self.api.resolve_callback(func.__name__, result)
-        return result
+        if func:
+            result = func(*args, **kwargs)
+            self.api.resolve_callback(func.__name__, result)
+            return result
+        else:
+            return None
 
     return wrapper
+

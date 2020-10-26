@@ -1,117 +1,55 @@
+"""
+使用装饰器示例
+"""
+
 from datetime import datetime
 from time import sleep
 
+from ctpbee.constant import *
 from ctpbee import Action, hickey
 from ctpbee import CtpBee
 from ctpbee import CtpbeeApi
 from ctpbee import RiskLevel
 from ctpbee import VLogger
+from ctpbee import helper
 
 
-class Vlog(VLogger):
+class M(CtpbeeApi):
+    def __init__(self, name):
+        super().__init__(name)
+        self.a = 0
+        self.sta = False
+        self.flag = True
+        self.instrument_set = ["rb2101.SHFE"]
 
-    def handler_record(self, record):
-        """ 处理日志信息代码 """
+    def on_bar(self, bar: BarData) -> None:
+        if bar.interval == 5 and bar.symbol =="rb2101":
+            print(bar.datetime, bar.close_price)
+        # self.action.buy(bar.close_price + 10, 10, bar)
+
+    def on_tick(self, tick: TickData) -> None:
+        pass
+        # print(tick)
+        # if self.flag:
+        #     self.action.buy(tick.last_price + 10, 10, tick)
+        #     self.flag = False
+
+    def on_contract(self, contract: ContractData):
+        self.action.subscribe(contract.local_symbol)
+
+    def on_order(self, order: OrderData) -> None:
+        # print(order)
+
         pass
 
-
-class ActionMe(Action):
-
-    def __init__(self, app):
-        super().__init__(app)
-        self.add_risk_check(self.short)
-        self.add_risk_check(self.cancel)
-
-
-class RiskMe(RiskLevel):
-
-    def realtime_check(self, cur):
+    def on_realtime(self):
+        # print(self.center.positions)
+        # print(self.center.active_orders)
         pass
-
-    def after_cancel_order(self, result):
-        """ 撤单之后 """
-
-    def after_send_order(self, result):
-        """ 发单之后 """
-
-    def before_short(self, *args, **kwargs):
-        """"""
-
-        # do something  ??
-        self.info("发单")
-        return True, args, kwargs
-
-    def after_short(self, result):
-
-        cal = 0
-        self.info("我在执行short后的事后检查")
-        while True:
-            sleep(1)
-            if cal > 3: break
-            cal += 1
-            self.info("正在检查呢 ")
-            # do something
-
-    def realtime_check(self):
-        """ """
-
-
-api = CtpbeeApi(extension_name="hi")
-
-
-@api.register()
-def get_it(self, hel):
-    print(hel)
-
-
-@api.route(handler="bar")
-def handle_bar(self, bar):
-    """ """
-    self.action.sell(bar.high_price, 1, bar)
-
-
-@api.route(handler="tick")
-def handle_tick(self, tick):
-    """ """
-    self.get_it("hhhh")
-    print("当前时间: ", str(datetime.now()))
-    print("tick时间: ", str(tick.datetime))
-
-
-@api.route(handler="contract")
-def handle_contract(self, contract):
-    if contract.local_symbol == "zn1911.SHFE":
-        self.app.subscribe(contract.local_symbol)
-
-
-@api.route(handler="timer")
-def realtime(self):
-    """ """
-
-
-@api.route(handler="position")
-def handle_position(self, position):
-    """ """
-
-
-@api.route(handler="account")
-def handle_account(self, account):
-    """ """
-
-
-@api.route(handler="order")
-def handle_order(self, order):
-    """ """
-
-
-@api.route(handler="trade")
-def handle_trade(self, trade):
-    """ """
 
 
 def create_app():
-    app = CtpBee("last", __name__, action_class=ActionMe, logger_class=Vlog, refresh=True,
-                 risk=RiskMe)
+    app = CtpBee("last", __name__, refresh=True)
 
     """ 
         载入配置信息 
@@ -123,11 +61,14 @@ def create_app():
         data_recorder 就是下面传入的插件名字
 
     """
-    app.add_extension(api)
+    m = M("name")
+    app.add_extension(m)
 
     """ 启动 """
-    return [app]
+    return app
 
 
 if __name__ == '__main__':
-    hickey.start_all(app_func=create_app)
+    # hickey.start_all(app_func=create_app)
+    app = create_app()
+    app.start()

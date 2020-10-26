@@ -8,8 +8,6 @@ from enum import Enum
 from logging import INFO
 from typing import Any
 
-from pandas import DataFrame
-
 
 class Missing:
     value = "属性缺失"
@@ -96,7 +94,7 @@ class Exchange(Enum):
     SSE = "SSE"
     SZSE = "SZSE"
     SGE = "SGE"
-
+    CTP = "ctp"
     # Global
     SMART = "SMART"
     NYMEX = "NYMEX"
@@ -135,7 +133,8 @@ EXCHANGE_MAPPING = {
     "BITMEX": Exchange.BITMEX,
     "OKEX": Exchange.OKEX,
     "HUOBI": Exchange.HUOBI,
-    "BITFINEX": Exchange.BITFINEX
+    "BITFINEX": Exchange.BITFINEX,
+    "CTP": Exchange.CTP
 }
 
 
@@ -174,6 +173,7 @@ EVENT_ACCOUNT = "account"
 EVENT_SHARED = "shared"
 EVENT_LAST = "last"
 EVENT_INIT_FINISHED = "init"
+EVENT_WARNING = "warning"
 
 
 @dataclass(init=False, repr=False)
@@ -235,17 +235,20 @@ class BaseData:
         return temp
 
     def _to_df(self):
-        temp = {}
-        for x in dir(self):
-            if x.startswith("_") or x.startswith("create"):
-                continue
-            if isinstance(getattr(self, x), Enum):
-                temp[x] = getattr(self, x).value
-                continue
-            temp[x] = getattr(self, x)
-
-        return DataFrame([temp], columns=list(temp.keys()).remove("datetime")).set_index(['datetime']) if temp.get(
-            "datetime", None) is not None else DataFrame([temp], columns=list(temp.keys()))
+        try:
+            from pandas import DataFrame
+            temp = {}
+            for x in dir(self):
+                if x.startswith("_") or x.startswith("create"):
+                    continue
+                if isinstance(getattr(self, x), Enum):
+                    temp[x] = getattr(self, x).value
+                    continue
+                temp[x] = getattr(self, x)
+            return DataFrame([temp], columns=list(temp.keys()).remove("datetime")).set_index(['datetime']) if temp.get(
+                "datetime", None) is not None else DataFrame([temp], columns=list(temp.keys()))
+        except ImportError:
+            raise ImportError("请使用pip install pandas 以获取此特性")
 
     def _asdict(self):
         """ 转换为字典 里面会有enum """
@@ -325,11 +328,14 @@ class TickData(BaseData):
     limit_down: float = 0
     open_interest: int = 0
     average_price: float = 0
+    settlement_price: float = 0
     pre_settlement_price: float = 0
+    pre_open_interest: int = 0
     open_price: float = 0
     high_price: float = 0
     low_price: float = 0
     pre_close: float = 0
+    turnover: float = 0
 
     bid_price_1: float = 0
     bid_price_2: float = 0
@@ -357,7 +363,12 @@ class TickData(BaseData):
 
     def __post_init__(self):
         """"""
-        self.local_symbol = f"{self.symbol}.{self.exchange.value}"
+        l = getattr(self, "local_symbol", None)
+        if l is not None:
+            setattr(self, "symbol", l.split(".")[0])
+            setattr(self, "exchange", l.split(".")[1])
+        else:
+            self.local_symbol = f"{self.symbol}.{self.exchange.value}"
 
 
 class BarData(BaseData):
@@ -374,11 +385,20 @@ class BarData(BaseData):
     high_price: float = 0
     low_price: float = 0
     close_price: float = 0
+    is_next: bool = False
+    is_last: bool = False
 
     def __post_init__(self):
         """"""
-        self.local_symbol = f"{self.symbol}.{self.exchange.value}"
-
+        l = getattr(self, "local_symbol", None)
+        if l is not None:
+            setattr(self, "symbol", l.split(".")[0])
+            setattr(self, "exchange", l.split(".")[1])
+        else:
+            try:
+                self.local_symbol = f"{self.symbol}.{self.exchange.value}"
+            except AttributeError:
+                self.local_symbol = f"{self.symbol}.{self.exchange}"
 
 class OrderData(BaseData):
     """
@@ -443,6 +463,7 @@ class TradeData(BaseData):
     price: float = 0
     volume: float = 0
     time: str = ""
+    order_time: str = ""
 
     def __post_init__(self):
         """"""
@@ -591,7 +612,7 @@ class OrderRequest(BaseRequest):
         except AttributeError:
             self.local_symbol = f"{self.symbol}.{self.exchange}"
 
-    def _create_order_data(self, order_id: str, gateway_name: str):
+    def _create_order_data(self, order_id: str, gateway_name: str, time=None):
         """
         Create order data from request.
         """
@@ -605,6 +626,7 @@ class OrderRequest(BaseRequest):
             price=self.price,
             volume=self.volume,
             gateway_name=gateway_name,
+            time=time
         )
         return order
 
@@ -677,6 +699,25 @@ class MarketDataRequest(BaseRequest):
     """ 请求市场数据 """
     symbol: str
     exchange: Exchange
+
+
+EVENT_TIMER = "timer"
+
+
+class Event:
+    """
+    Event object consists of a type string which is used
+    by event engine for distributing event, and a data
+    object which contains the real data.
+    """
+
+    def __init__(self, type: str, data: Any = None):
+        """"""
+        self.type = type
+        self.data = data
+
+    def __str__(self):
+        return "Event(type={})".format(self.type)
 
 
 data_class = [TickData, BarData, OrderData, TradeData, PositionData, AccountData, LogData, ContractData, SharedData]
